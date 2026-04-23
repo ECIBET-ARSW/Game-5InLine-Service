@@ -1,0 +1,14 @@
+package com.ecibet.game5inline.exception;
+
+public enum ErrorCode {
+    LOBBY_NOT_FOUND,
+    LOBBY_FULL,
+    LOBBY_ALREADY_STARTED,
+    NOT_HOST,
+    MIN_PLAYERS_NOT_REACHED,
+    INVALID_BET_AMOUNT,
+    INVALID_MIN_PLAYERS,
+    PLAYER_ALREADY_IN_LOBBY,
+    LOBBY_NOT_WAITING,
+    COLOR_ALREADY_TAKEN
+}

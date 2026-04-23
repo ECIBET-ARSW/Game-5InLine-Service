@@ -1,0 +1,49 @@
+spring:
+  application:
+    name: game-5inline-service
+
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    connection-timeout: 5000
+
+server:
+  port: ${PORT:8082}
+
+caffeine:
+  cache:
+    max-size: 1000
+    expire-after-write-seconds: 3600
+
+game:
+  lobby:
+    max-waiting-seconds: 120
+    cleanup-interval-seconds: 60
+    max-players: 5
+    min-players-options: 3,4,5
+    bet-options: 10,25,50
+
+  engine:
+    ticks-per-second: 30
+    initial-world-speed: 5.0
+    speed-increase-percentage: 5.0
+    speed-increase-interval-seconds: 10
+    gravity: 0.5
+    jump-power: -12.0
+    slide-height-reduction: 0.5
+    slide-duration-ms: 500
+    jump-duration-ms: 400
+
+logging:
+  level:
+    com.ecibet.game5inline: DEBUG
+
+rabbitmq:
+  exchange:
+    game-events: game.events
+  queue:
+    wallet-settlements: wallet.settlements
+  routing-key:
+    game-settled: game.5inline.settled
