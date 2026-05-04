@@ -20,10 +20,10 @@ public class LobbyCleanupScheduler {
 
     private final ActiveLobbiesCache lobbyCache;
 
-    @Value("${game.lobby.max-waiting-seconds:120}")
+    @Value("${game.lobby.max-waiting-seconds:3600}")
     private int maxWaitingSeconds;
 
-    @Scheduled(fixedDelayString = "${game.lobby.cleanup-interval-seconds:60000}", initialDelay = 60000)
+    @Scheduled(fixedDelay = 60000, initialDelay = 60000)
     public void cleanupExpiredLobbies() {
         List<Lobby> lobbies = lobbyCache.getAll().stream().toList();
         LocalDateTime now = LocalDateTime.now();

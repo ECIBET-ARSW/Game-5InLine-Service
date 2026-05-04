@@ -19,7 +19,7 @@
     <description>Game Service for 5InLine</description>
 
     <properties>
-        <java.version>21</java.version>
+        <java.version>17</java.version>
     </properties>
 
     <dependencies>

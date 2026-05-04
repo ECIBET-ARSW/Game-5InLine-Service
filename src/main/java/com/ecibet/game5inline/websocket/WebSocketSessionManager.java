@@ -4,18 +4,27 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.socket.WebSocketSession;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 @Component
 public class WebSocketSessionManager {
 
     private final Map<String, String> sessionToLobby = new ConcurrentHashMap<>();
     private final Map<String, String> sessionToUser = new ConcurrentHashMap<>();
-    private final Map<String, WebSocketSession> userToSession = new ConcurrentHashMap<>();
+    private final Map<String, WebSocketSession> sessionToWebSocket = new ConcurrentHashMap<>();
+    private final Map<String, String> userToSession = new ConcurrentHashMap<>();
 
     public void registerSession(String sessionId, String userId, String lobbyCode) {
         sessionToLobby.put(sessionId, lobbyCode);
         sessionToUser.put(sessionId, userId);
+        userToSession.put(userId, sessionId);
+    }
+
+    public void setUserSession(String userId, WebSocketSession session) {
+        userToSession.put(userId, session.getId());
+        sessionToWebSocket.put(session.getId(), session);
     }
 
     public void unregisterSession(String sessionId) {
@@ -24,6 +33,7 @@ public class WebSocketSessionManager {
             userToSession.remove(userId);
         }
         sessionToLobby.remove(sessionId);
+        sessionToWebSocket.remove(sessionId);
     }
 
     public String getLobbyBySession(String sessionId) {
@@ -34,15 +44,14 @@ public class WebSocketSessionManager {
         return sessionToUser.get(sessionId);
     }
 
-    public void setUserSession(String userId, WebSocketSession session) {
-        userToSession.put(userId, session);
+    public WebSocketSession getSession(String sessionId) {
+        return sessionToWebSocket.get(sessionId);
     }
 
-    public WebSocketSession getUserSession(String userId) {
-        return userToSession.get(userId);
-    }
-
-    public void removeUserSession(String userId) {
-        userToSession.remove(userId);
+    public Set<String> getSessionsByLobby(String lobbyCode) {
+        return sessionToLobby.entrySet().stream()
+                .filter(entry -> lobbyCode.equals(entry.getValue()))
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toSet());
     }
 }

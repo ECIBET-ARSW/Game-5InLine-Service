@@ -4,21 +4,24 @@ import com.ecibet.game5inline.cache.ActiveLobbiesCache;
 import com.ecibet.game5inline.model.Lobby;
 import com.ecibet.game5inline.model.Player;
 import com.ecibet.game5inline.model.enums.LobbyStatus;
+import com.ecibet.game5inline.model.enums.PlayerColor;
 import com.ecibet.game5inline.service.GameEngine;
 import com.ecibet.game5inline.service.GameEngineManager;
-import com.ecibet.game5inline.service.LobbyManager;
-import com.ecibet.game5inline.websocket.dto.inbound.*;
-import com.ecibet.game5inline.websocket.dto.outbound.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Component
@@ -28,138 +31,293 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
     private final ObjectMapper objectMapper;
     private final WebSocketSessionManager sessionManager;
     private final ActiveLobbiesCache lobbyCache;
-    private final LobbyManager lobbyManager;
     private final GameEngineManager gameEngineManager;
+
+    private final Map<String, Long> lastToggleTime = new ConcurrentHashMap<>();
+
+    @EventListener
+    public void handleGameEvent(GameEvent event) {
+        String eventType = event.getType();
+        String lobbyCode = event.getLobbyCode();
+        Object data = event.getData();
+
+        log.info("=== EVENTO RECIBIDO EN WEBSOCKET HANDLER === Tipo: {}, Lobby: {}, Thread: {}",
+                eventType, lobbyCode, Thread.currentThread().getName());
+
+        if (lobbyCode == null) {
+            log.warn("Lobby code es null, ignorando evento");
+            return;
+        }
+
+        Map<String, Object> message = new HashMap<>();
+        message.put("type", eventType);
+
+        if (data instanceof Map) {
+            message.putAll((Map<String, Object>) data);
+        }
+
+        String jsonMessage;
+        try {
+            jsonMessage = objectMapper.writeValueAsString(message);
+            log.info("Enviando mensaje a lobby {}: {}", lobbyCode, jsonMessage);
+        } catch (Exception e) {
+            log.error("Error serializando: {}", e.getMessage());
+            return;
+        }
+
+        int sentCount = 0;
+        for (String sessionId : sessionManager.getSessionsByLobby(lobbyCode)) {
+            WebSocketSession session = sessionManager.getSession(sessionId);
+            if (session != null && session.isOpen()) {
+                try {
+                    session.sendMessage(new TextMessage(jsonMessage));
+                    sentCount++;
+                    log.info("Mensaje enviado a sesion {}", sessionId);
+                } catch (Exception e) {
+                    log.error("Error enviando a sesion {}: {}", sessionId, e.getMessage());
+                }
+            }
+        }
+        log.info("Mensaje {} enviado a {} sesiones en lobby {}", eventType, sentCount, lobbyCode);
+    }
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
         log.info("WebSocket connection established: {}", session.getId());
+
+        String query = session.getUri().getQuery();
+        String userId = null;
+        String lobbyCode = null;
+
+        if (query != null) {
+            for (String param : query.split("&")) {
+                if (param.startsWith("userId=")) {
+                    userId = param.substring(7);
+                }
+                if (param.startsWith("lobbyCode=")) {
+                    lobbyCode = param.substring(10);
+                }
+            }
+        }
+
+        if (userId != null && lobbyCode != null) {
+            sessionManager.registerSession(session.getId(), userId, lobbyCode);
+            sessionManager.setUserSession(userId, session);
+            log.info("Usuario {} registrado en sala {}", userId, lobbyCode);
+            broadcastLobbyUpdate(lobbyCode);
+        } else {
+            log.warn("No userId or lobbyCode in query: {}", query);
+        }
     }
 
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
         String payload = message.getPayload();
-        Map<String, Object> json = objectMapper.readValue(payload, Map.class);
-        String type = (String) json.get("type");
+        log.info("Mensaje recibido: {}", payload);
 
-        switch (type) {
-            case "PLAYER_ACTION":
-                handlePlayerAction(session, json);
-                break;
-            case "CHANGE_COLOR":
-                handleChangeColor(session, json);
-                break;
-            case "TOGGLE_READY":
-                handleToggleReady(session, json);
-                break;
-            case "START_GAME":
-                handleStartGame(session, json);
-                break;
-            case "LEAVE_ROOM":
-                handleLeaveRoom(session, json);
-                break;
-            default:
-                log.warn("Unknown message type: {}", type);
+        String userId = sessionManager.getUserIdBySession(session.getId());
+        String lobbyCode = sessionManager.getLobbyBySession(session.getId());
+
+        if (userId == null || lobbyCode == null) {
+            log.warn("User {} or lobby {} not found for session {}", userId, lobbyCode, session.getId());
+            return;
+        }
+
+        try {
+            Map<String, Object> json = objectMapper.readValue(payload, Map.class);
+            String type = (String) json.get("type");
+            if (type == null) return;
+
+            Lobby lobby = lobbyCache.getByCode(lobbyCode).orElse(null);
+            if (lobby == null) return;
+
+            log.info("Processing message type: {} for user {} in lobby {}", type, userId, lobbyCode);
+
+            switch (type) {
+                case "PLAYER_ACTION":
+                    handlePlayerAction(session, json, userId, lobbyCode, lobby);
+                    break;
+                case "TOGGLE_READY":
+                    handleToggleReady(session, json, userId, lobbyCode, lobby);
+                    break;
+                case "START_GAME":
+                    handleStartGame(session, json, userId, lobbyCode, lobby);
+                    break;
+                case "LEAVE_ROOM":
+                    handleLeaveRoom(session, json, userId, lobbyCode, lobby);
+                    break;
+                case "CHANGE_COLOR":
+                    handleChangeColor(session, json, userId, lobbyCode, lobby);
+                    break;
+                case "CLIENT_READY":
+                    handleClientReady(session, userId, lobbyCode, lobby);
+                    break;
+                case "PING":
+                    sendPong(session);
+                    break;
+            }
+        } catch (Exception e) {
+            log.error("Error handling message: {}", e.getMessage(), e);
         }
     }
 
-    private void handlePlayerAction(WebSocketSession session, Map<String, Object> json) throws Exception {
-        String userId = sessionManager.getUserIdBySession(session.getId());
-        if (userId == null) return;
+    private void sendPong(WebSocketSession session) {
+        try {
+            Map<String, Object> pong = new HashMap<>();
+            pong.put("type", "PONG");
+            session.sendMessage(new TextMessage(objectMapper.writeValueAsString(pong)));
+        } catch (Exception e) {
+            log.error("Error sending pong: {}", e.getMessage());
+        }
+    }
 
-        String lobbyCode = sessionManager.getLobbyBySession(session.getId());
-        if (lobbyCode == null) return;
-
-        Lobby lobby = lobbyCache.getByCode(lobbyCode).orElse(null);
-        if (lobby == null || lobby.getStatus() != LobbyStatus.IN_PROGRESS) return;
-
+    private void handlePlayerAction(WebSocketSession session, Map<String, Object> json, String userId, String lobbyCode, Lobby lobby) {
+        if (lobby.getStatus() != LobbyStatus.IN_PROGRESS) return;
         GameEngine engine = gameEngineManager.getEngine(lobby.getId());
         if (engine == null) return;
-
         String action = (String) json.get("action");
         Long timestamp = json.get("timestamp") != null ? ((Number) json.get("timestamp")).longValue() : System.currentTimeMillis();
-
         engine.addInput(userId, action, timestamp);
+        log.info("Player action - User: {}, Action: {}", userId, action);
     }
 
-    private void handleChangeColor(WebSocketSession session, Map<String, Object> json) {
-        String userId = sessionManager.getUserIdBySession(session.getId());
-        if (userId == null) return;
-
-        String lobbyCode = sessionManager.getLobbyBySession(session.getId());
-        if (lobbyCode == null) return;
-
-        Lobby lobby = lobbyCache.getByCode(lobbyCode).orElse(null);
-        if (lobby == null || lobby.getStatus() != LobbyStatus.WAITING) return;
-
-        String colorStr = (String) json.get("color");
-        // Color change logic would go here
-    }
-
-    private void handleToggleReady(WebSocketSession session, Map<String, Object> json) {
-        String userId = sessionManager.getUserIdBySession(session.getId());
-        if (userId == null) return;
-
-        String lobbyCode = sessionManager.getLobbyBySession(session.getId());
-        if (lobbyCode == null) return;
-
-        Lobby lobby = lobbyCache.getByCode(lobbyCode).orElse(null);
-        if (lobby == null || lobby.getStatus() != LobbyStatus.WAITING) return;
+    private void handleToggleReady(WebSocketSession session, Map<String, Object> json, String userId, String lobbyCode, Lobby lobby) {
+        long now = System.currentTimeMillis();
+        Long lastTime = lastToggleTime.get(userId);
+        if (lastTime != null && (now - lastTime) < 1000) return;
+        lastToggleTime.put(userId, now);
 
         Player player = lobby.getPlayers().get(userId);
         if (player != null) {
-            Boolean isReady = json.get("isReady") != null ? (Boolean) json.get("isReady") : !player.getIsReady();
-            player.setIsReady(isReady);
+            player.setIsReady(!player.getIsReady());
             lobbyCache.put(lobby);
-
-            broadcastToLobby(lobbyCode, PlayerReadyChangedMessage.from(userId, isReady));
+            log.info("Player {} toggled ready to: {}", userId, player.getIsReady());
+            broadcastLobbyUpdate(lobbyCode);
         }
     }
 
-    private void handleStartGame(WebSocketSession session, Map<String, Object> json) {
-        String userId = sessionManager.getUserIdBySession(session.getId());
-        if (userId == null) return;
+    private void handleStartGame(WebSocketSession session, Map<String, Object> json, String userId, String lobbyCode, Lobby lobby) {
+        log.info("START_GAME request from user {} in lobby {}", userId, lobbyCode);
 
-        String lobbyCode = (String) json.get("lobbyCode");
-        if (lobbyCode == null) return;
+        if (!lobby.getHostId().equals(userId)) {
+            log.warn("User {} is not host", userId);
+            return;
+        }
 
+        if (lobby.getPlayers().size() < lobby.getMinPlayers()) {
+            log.warn("Not enough players: {}/{}", lobby.getPlayers().size(), lobby.getMinPlayers());
+            return;
+        }
+
+        if (!lobby.allPlayersReady()) {
+            log.warn("Not all players ready");
+            return;
+        }
+
+        lobby.setStatus(LobbyStatus.IN_PROGRESS);
+        lobbyCache.put(lobby);
+
+        log.info("Starting game engine for lobby {}", lobbyCode);
+        gameEngineManager.startEngine(lobby, lobby.getGameConfig());
+    }
+
+    private void handleLeaveRoom(WebSocketSession session, Map<String, Object> json, String userId, String lobbyCode, Lobby lobby) {
+        lobby.removePlayer(userId);
+        if (lobby.getPlayers().isEmpty()) {
+            lobbyCache.remove(lobby.getId());
+        } else {
+            lobbyCache.put(lobby);
+            broadcastLobbyUpdate(lobbyCode);
+        }
+        sessionManager.unregisterSession(session.getId());
+        log.info("Player {} left lobby {}", userId, lobbyCode);
+    }
+
+    private void handleChangeColor(WebSocketSession session, Map<String, Object> json, String userId, String lobbyCode, Lobby lobby) {
+        String color = (String) json.get("color");
+        Player player = lobby.getPlayers().get(userId);
+        if (player != null) {
+            try {
+                player.setColor(PlayerColor.valueOf(color.toUpperCase()));
+                lobbyCache.put(lobby);
+                broadcastLobbyUpdate(lobbyCode);
+                log.info("Player {} changed color to {}", userId, color);
+            } catch (IllegalArgumentException e) {
+                log.error("Invalid color: {}", color);
+            }
+        }
+    }
+
+    private void handleClientReady(WebSocketSession session, String userId, String lobbyCode, Lobby lobby) {
+        GameEngine engine = gameEngineManager.getEngine(lobby.getId());
+        if (engine != null) {
+            engine.addReadyClient(userId);
+            log.info("Client {} is ready for game in lobby {}", userId, lobbyCode);
+        } else {
+            log.warn("No game engine found for lobby {} when client {} tried to ready", lobbyCode, userId);
+        }
+    }
+
+    public void broadcastLobbyUpdate(String lobbyCode) {
         try {
-            lobbyManager.startGame(lobbyCode, userId);
+            Lobby lobby = lobbyCache.getByCode(lobbyCode).orElse(null);
+            if (lobby == null) {
+                log.warn("Lobby {} not found for broadcast", lobbyCode);
+                return;
+            }
+
+            List<Map<String, Object>> playersList = new ArrayList<>();
+            for (Player player : lobby.getPlayers().values()) {
+                Map<String, Object> playerMap = new HashMap<>();
+                playerMap.put("userId", player.getUserId());
+                playerMap.put("username", player.getUsername());
+                playerMap.put("color", player.getColor().name().toLowerCase());
+                playerMap.put("isReady", player.getIsReady());
+                playerMap.put("isHost", player.getUserId().equals(lobby.getHostId()));
+                playersList.add(playerMap);
+            }
+
+            Map<String, Object> message = new HashMap<>();
+            message.put("type", "LOBBY_UPDATE");
+            message.put("players", playersList);
+            message.put("lobbyCode", lobbyCode);
+            message.put("betAmount", lobby.getBetAmount());
+            message.put("minPlayers", lobby.getMinPlayers());
+            message.put("currentPlayers", lobby.getPlayers().size());
+            message.put("maxPlayers", lobby.getMaxPlayers());
+            message.put("hostId", lobby.getHostId());
+
+            String jsonMessage = objectMapper.writeValueAsString(message);
+            log.info("Broadcasting LOBBY_UPDATE to lobby {}: {}", lobbyCode, jsonMessage);
+
+            int sentCount = 0;
+            for (String sessionId : sessionManager.getSessionsByLobby(lobbyCode)) {
+                WebSocketSession session = sessionManager.getSession(sessionId);
+                if (session != null && session.isOpen()) {
+                    session.sendMessage(new TextMessage(jsonMessage));
+                    sentCount++;
+                }
+            }
+            log.info("LOBBY_UPDATE sent to {} sessions", sentCount);
         } catch (Exception e) {
-            log.error("Failed to start game: {}", e.getMessage());
+            log.error("Error broadcasting lobby update: {}", e.getMessage(), e);
         }
-    }
-
-    private void handleLeaveRoom(WebSocketSession session, Map<String, Object> json) {
-        String userId = sessionManager.getUserIdBySession(session.getId());
-        if (userId == null) return;
-
-        String lobbyCode = (String) json.get("lobbyCode");
-        if (lobbyCode == null) return;
-
-        try {
-            lobbyManager.leaveLobby(lobbyCode, userId);
-            sessionManager.unregisterSession(session.getId());
-        } catch (Exception e) {
-            log.error("Failed to leave room: {}", e.getMessage());
-        }
-    }
-
-    private void broadcastToLobby(String lobbyCode, Object message) {
-        // Broadcast implementation would go here
-        // This would iterate through sessions in the lobby and send the message
     }
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         String userId = sessionManager.getUserIdBySession(session.getId());
-        if (userId != null) {
-            String lobbyCode = sessionManager.getLobbyBySession(session.getId());
-            if (lobbyCode != null) {
-                try {
-                    lobbyManager.leaveLobby(lobbyCode, userId);
-                } catch (Exception e) {
-                    log.error("Failed to leave lobby on disconnect: {}", e.getMessage());
+        String lobbyCode = sessionManager.getLobbyBySession(session.getId());
+
+        if (userId != null && lobbyCode != null) {
+            Lobby lobby = lobbyCache.getByCode(lobbyCode).orElse(null);
+            if (lobby != null) {
+                lobby.removePlayer(userId);
+                if (!lobby.getPlayers().isEmpty()) {
+                    lobbyCache.put(lobby);
+                    broadcastLobbyUpdate(lobbyCode);
+                } else {
+                    lobbyCache.remove(lobby.getId());
                 }
             }
         }

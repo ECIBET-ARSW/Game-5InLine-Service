@@ -10,29 +10,89 @@ import lombok.NoArgsConstructor;
 @NoArgsConstructor
 @AllArgsConstructor
 public class GameConfig {
-    private Integer maxPlayers;
-    private Integer trackLength;
-    private Integer initialLives;
-    private Integer frameRate;
-    private Double worldSpeed;
-    private Double gravity;
-    private Double jumpPower;
-    private Double slideHeightReduction;
-    private Integer slideDurationMs;
-    private Integer jumpDurationMs;
+
+    @Builder.Default
+    private double worldSpeed = 6.0;
+
+    @Builder.Default
+    private double gravity = 0.9;
+
+    @Builder.Default
+    private double jumpPower = -28.0;
+
+    @Builder.Default
+    private double slideDurationMs = 500.0;
+
+    @Builder.Default
+    private int initialLives = 3;
+
+    @Builder.Default
+    private double trackLength = 10000.0;
+
+    @Builder.Default
+    private double speedIncreaseInterval = 30000.0;
+
+    @Builder.Default
+    private double speedIncreaseFactor = 1.02;
+
+    @Builder.Default
+    private double maxSpeed = 12.0;
+
+    @Builder.Default
+    private double minSpeed = 6.0;
 
     public static GameConfig defaultConfig() {
         return GameConfig.builder()
-                .maxPlayers(5)
-                .trackLength(1000)
+                .worldSpeed(6.0)
+                .gravity(0.9)
+                .jumpPower(-28.0)
+                .slideDurationMs(500.0)
                 .initialLives(3)
-                .frameRate(30)
-                .worldSpeed(5.0)
-                .gravity(0.5)
-                .jumpPower(-12.0)
-                .slideHeightReduction(0.5)
-                .slideDurationMs(500)
-                .jumpDurationMs(400)
+                .trackLength(10000.0)
+                .speedIncreaseInterval(30000.0)
+                .speedIncreaseFactor(1.02)
+                .maxSpeed(12.0)
+                .minSpeed(6.0)
                 .build();
+    }
+
+    public double getWorldSpeed() {
+        return worldSpeed;
+    }
+
+    public double getGravity() {
+        return gravity;
+    }
+
+    public double getJumpPower() {
+        return jumpPower;
+    }
+
+    public double getSlideDurationMs() {
+        return slideDurationMs;
+    }
+
+    public int getInitialLives() {
+        return initialLives;
+    }
+
+    public double getTrackLength() {
+        return trackLength;
+    }
+
+    public double getSpeedIncreaseInterval() {
+        return speedIncreaseInterval;
+    }
+
+    public double getSpeedIncreaseFactor() {
+        return speedIncreaseFactor;
+    }
+
+    public double getMaxSpeed() {
+        return maxSpeed;
+    }
+
+    public double getMinSpeed() {
+        return minSpeed;
     }
 }

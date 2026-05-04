@@ -11,9 +11,13 @@ import com.ecibet.game5inline.model.enums.PlayerColor;
 import com.ecibet.game5inline.util.LobbyCodeGenerator;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Slf4j
@@ -24,14 +28,28 @@ public class LobbyManager {
     private final ActiveLobbiesCache lobbyCache;
     private final LobbyCodeGenerator codeGenerator;
     private final GameEngineManager gameEngineManager;
+    private final ApplicationEventPublisher eventPublisher;
+
+    private static final List<Integer> VALID_BET_AMOUNTS = Arrays.asList(1000, 5000, 10000, 25000, 50000, 100000, 200000, 500000);
+    private static final List<Integer> VALID_MIN_PLAYERS = Arrays.asList(3, 4, 5);
+
+    private void publishLobbyEvent(String lobbyCode, String eventType) {
+        Map<String, Object> event = new HashMap<>();
+        event.put("type", eventType);
+        event.put("lobbyCode", lobbyCode);
+        eventPublisher.publishEvent(event);
+        log.info("Evento publicado: {} para lobby {}", eventType, lobbyCode);
+    }
 
     public Lobby createLobby(String hostId, String hostName, Integer betAmount, Integer minPlayers, PlayerColor color) {
-        if (betAmount == null || !List.of(10, 25, 50).contains(betAmount)) {
-            throw new BusinessException(ErrorCode.INVALID_BET_AMOUNT, "Bet amount must be 10, 25, or 50");
+        if (betAmount == null || !VALID_BET_AMOUNTS.contains(betAmount)) {
+            throw new BusinessException(ErrorCode.INVALID_BET_AMOUNT,
+                    "Bet amount must be one of: " + VALID_BET_AMOUNTS);
         }
 
-        if (minPlayers == null || !List.of(3, 4, 5).contains(minPlayers)) {
-            throw new BusinessException(ErrorCode.INVALID_MIN_PLAYERS, "Min players must be 3, 4, or 5");
+        if (minPlayers == null || !VALID_MIN_PLAYERS.contains(minPlayers)) {
+            throw new BusinessException(ErrorCode.INVALID_MIN_PLAYERS,
+                    "Min players must be 3, 4, or 5");
         }
 
         String lobbyId = UUID.randomUUID().toString();
@@ -45,7 +63,9 @@ public class LobbyManager {
 
         lobbyCache.put(lobby);
 
-        log.info("Lobby created: {} by {} with bet ${}", lobbyCode, hostName, betAmount);
+        log.info("Lobby created: {} by {} with bet ${} COP", lobbyCode, hostName, betAmount);
+
+        publishLobbyEvent(lobbyCode, "LOBBY_UPDATED");
 
         return lobby;
     }
@@ -74,7 +94,8 @@ public class LobbyManager {
         }
 
         if (!betAmount.equals(lobby.getBetAmount())) {
-            throw new BusinessException(ErrorCode.INVALID_BET_AMOUNT, "Bet amount does not match lobby bet amount");
+            throw new BusinessException(ErrorCode.INVALID_BET_AMOUNT,
+                    "Bet amount does not match lobby bet amount. Expected: " + lobby.getBetAmount() + ", got: " + betAmount);
         }
 
         Player player = Player.createNew(userId, username, color, betAmount);
@@ -83,6 +104,8 @@ public class LobbyManager {
         lobbyCache.put(lobby);
 
         log.info("Player {} joined lobby {}", username, lobbyCode);
+
+        publishLobbyEvent(lobbyCode, "LOBBY_UPDATED");
 
         return lobby;
     }
@@ -103,7 +126,23 @@ public class LobbyManager {
             log.info("Lobby {} removed (empty)", lobbyCode);
         } else {
             lobbyCache.put(lobby);
+            publishLobbyEvent(lobbyCode, "LOBBY_UPDATED");
             log.info("Player {} left lobby {}", userId, lobbyCode);
+        }
+    }
+
+    public void toggleReady(String lobbyCode, String userId) {
+        Lobby lobby = lobbyCache.getByCode(lobbyCode)
+                .orElseThrow(() -> new BusinessException(ErrorCode.LOBBY_NOT_FOUND, "Lobby not found: " + lobbyCode));
+
+        Player player = lobby.getPlayers().get(userId);
+        if (player != null) {
+            player.setIsReady(!player.getIsReady());
+            lobbyCache.put(lobby);
+
+            publishLobbyEvent(lobbyCode, "LOBBY_UPDATED");
+
+            log.info("Player {} ready status: {} in lobby {}", userId, player.getIsReady(), lobbyCode);
         }
     }
 
@@ -111,17 +150,35 @@ public class LobbyManager {
         Lobby lobby = lobbyCache.getByCode(lobbyCode)
                 .orElseThrow(() -> new BusinessException(ErrorCode.LOBBY_NOT_FOUND, "Lobby not found: " + lobbyCode));
 
+        log.info("StartGame called - lobby: {}, userId: {}, hostId: {}", lobbyCode, userId, lobby.getHostId());
+
         if (!lobby.getHostId().equals(userId)) {
             throw new BusinessException(ErrorCode.NOT_HOST, "Only the host can start the game");
         }
 
-        if (!lobby.canStart()) {
+        log.info("Players in lobby: {}, Min players required: {}", lobby.getPlayers().size(), lobby.getMinPlayers());
+
+        if (lobby.getPlayers().size() < lobby.getMinPlayers()) {
             throw new BusinessException(ErrorCode.MIN_PLAYERS_NOT_REACHED,
                     "Need at least " + lobby.getMinPlayers() + " players to start. Current: " + lobby.getPlayers().size());
         }
 
-        lobby.setStatus(LobbyStatus.STARTING);
+        boolean allReady = lobby.allPlayersReady();
+        log.info("All players ready: {}", allReady);
+
+        for (Player player : lobby.getPlayers().values()) {
+            log.info("Player {} - ready: {}", player.getUsername(), player.getIsReady());
+        }
+
+        if (!allReady) {
+            throw new BusinessException(ErrorCode.MIN_PLAYERS_NOT_REACHED,
+                    "All players must be ready before starting the game");
+        }
+
+        lobby.setStatus(LobbyStatus.IN_PROGRESS);
         lobbyCache.put(lobby);
+
+        publishLobbyEvent(lobbyCode, "GAME_STARTING");
 
         GameConfig config = lobby.getGameConfig();
         config.setWorldSpeed(5.0);

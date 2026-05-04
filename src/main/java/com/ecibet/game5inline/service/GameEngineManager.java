@@ -5,6 +5,7 @@ import com.ecibet.game5inline.model.GameConfig;
 import com.ecibet.game5inline.model.Lobby;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
@@ -18,6 +19,7 @@ import java.util.concurrent.Executors;
 public class GameEngineManager {
 
     private final GameEventPublisher eventPublisher;
+    private final ApplicationEventPublisher applicationEventPublisher;
     private final Map<String, GameEngine> activeEngines = new ConcurrentHashMap<>();
     private final ExecutorService executorService = Executors.newCachedThreadPool();
 
@@ -27,7 +29,7 @@ public class GameEngineManager {
             return;
         }
 
-        GameEngine engine = new GameEngine(lobby, config, eventPublisher);
+        GameEngine engine = new GameEngine(lobby, config, eventPublisher, applicationEventPublisher);
         activeEngines.put(lobby.getId(), engine);
 
         executorService.submit(engine);
