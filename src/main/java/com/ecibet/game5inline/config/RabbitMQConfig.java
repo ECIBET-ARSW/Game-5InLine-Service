@@ -13,9 +13,11 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class RabbitMQConfig {
 
-    public static final String GAME_EVENTS_EXCHANGE = "game.events";
-    public static final String WALLET_SETTLEMENTS_QUEUE = "wallet.settlements";
-    public static final String GAME_SETTLED_ROUTING_KEY = "game.5inline.settled";
+    public static final String GAME_EVENTS_EXCHANGE = "game.events.exchange";
+    public static final String BET_WON_QUEUE = "bet.won.queue";
+    public static final String BET_LOST_QUEUE = "bet.lost.queue";
+    public static final String BET_WON_ROUTING_KEY = "bet.won";
+    public static final String BET_LOST_ROUTING_KEY = "bet.lost";
 
     @Bean
     public TopicExchange gameEventsExchange() {
@@ -23,16 +25,29 @@ public class RabbitMQConfig {
     }
 
     @Bean
-    public Queue walletSettlementsQueue() {
-        return new Queue(WALLET_SETTLEMENTS_QUEUE, true);
+    public Queue betWonQueue() {
+        return new Queue(BET_WON_QUEUE, true);
     }
 
     @Bean
-    public Binding walletSettlementsBinding() {
+    public Queue betLostQueue() {
+        return new Queue(BET_LOST_QUEUE, true);
+    }
+
+    @Bean
+    public Binding betWonBinding() {
         return BindingBuilder
-                .bind(walletSettlementsQueue())
+                .bind(betWonQueue())
                 .to(gameEventsExchange())
-                .with(GAME_SETTLED_ROUTING_KEY);
+                .with(BET_WON_ROUTING_KEY);
+    }
+
+    @Bean
+    public Binding betLostBinding() {
+        return BindingBuilder
+                .bind(betLostQueue())
+                .to(gameEventsExchange())
+                .with(BET_LOST_ROUTING_KEY);
     }
 
     @Bean

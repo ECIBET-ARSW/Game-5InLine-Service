@@ -27,7 +27,9 @@ public class GameEngine implements Runnable {
     private final ApplicationEventPublisher applicationEventPublisher;
     private final Set<String> readyClients;
     private final Map<String, Boolean> playerRunning;
-    private final Map<String, Long> lastCollisionTime;
+    private final Map<String, Double> playerVelocityY;
+    private final Map<String, Boolean> playerIsJumping;
+    private final Map<String, Long> lastActiveTime;
     private boolean running;
     private long lastTickTime;
     private long gameStartTime;
@@ -40,6 +42,9 @@ public class GameEngine implements Runnable {
     private boolean gameStarted;
     private long countdownTickLast;
     private Random random;
+    private double lastObstacleX;
+    private String gameEndMessage;
+    private boolean testingMode = true;
 
     public GameEngine(Lobby lobby, GameConfig config, GameEventPublisher eventPublisher, ApplicationEventPublisher applicationEventPublisher) {
         this.lobby = lobby;
@@ -51,7 +56,9 @@ public class GameEngine implements Runnable {
         this.effects = new ArrayList<>();
         this.readyClients = ConcurrentHashMap.newKeySet();
         this.playerRunning = new HashMap<>();
-        this.lastCollisionTime = new HashMap<>();
+        this.playerVelocityY = new HashMap<>();
+        this.playerIsJumping = new HashMap<>();
+        this.lastActiveTime = new HashMap<>();
         this.running = true;
         this.worldOffset = 0.0;
         this.currentSpeed = 0.0;
@@ -60,9 +67,11 @@ public class GameEngine implements Runnable {
         this.gameStarted = false;
         this.countdownTickLast = 0;
         this.random = new Random();
+        this.lastObstacleX = 0;
+        this.gameEndMessage = "";
 
         double startX = 400.0;
-        double startY = 448.0;
+        double startY = config.getGroundY();
 
         for (Player player : lobby.getPlayers().values()) {
             inputQueues.put(player.getUserId(), new ConcurrentLinkedQueue<>());
@@ -75,7 +84,9 @@ public class GameEngine implements Runnable {
             player.setFrameIndex(0);
             player.setIsOnGround(true);
             playerRunning.put(player.getUserId(), false);
-            lastCollisionTime.put(player.getUserId(), 0L);
+            playerVelocityY.put(player.getUserId(), 0.0);
+            playerIsJumping.put(player.getUserId(), false);
+            lastActiveTime.put(player.getUserId(), System.currentTimeMillis());
             startX += 50;
         }
     }
@@ -87,10 +98,8 @@ public class GameEngine implements Runnable {
         Queue<PlayerInput> queue = inputQueues.get(userId);
         if (queue != null) {
             queue.offer(new PlayerInput(action, timestamp));
-            log.info("Input added - User: {}, Action: {}, Queue size: {}", userId, action, queue.size());
-        } else {
-            log.warn("No input queue found for user: {}", userId);
         }
+        lastActiveTime.put(userId, System.currentTimeMillis());
     }
 
     public void addReadyClient(String userId) {
@@ -104,7 +113,14 @@ public class GameEngine implements Runnable {
 
     private void broadcastEvent(String eventType, Map<String, Object> data) {
         applicationEventPublisher.publishEvent(new GameEvent(this, eventType, lobby.getCode(), data));
-        log.debug("Evento publicado: {} para lobby {}", eventType, lobby.getCode());
+    }
+
+    private void broadcastGameEndMessage(String message) {
+        Map<String, Object> endMsg = new HashMap<>();
+        endMsg.put("type", "GAME_END_MESSAGE");
+        endMsg.put("message", message);
+        broadcastEvent("GAME_END_MESSAGE", endMsg);
+        log.info("Game end message: {}", message);
     }
 
     @Override
@@ -114,10 +130,12 @@ public class GameEngine implements Runnable {
         lastTickTime = gameStartTime;
         lastSpeedIncrease = gameStartTime;
 
-        log.info("Game engine started for lobby {} - waiting max 2 seconds for clients", lobby.getCode());
+        log.info("Game engine started for lobby {}", lobby.getCode());
 
         while (running && lobby.getStatus() == LobbyStatus.IN_PROGRESS) {
             long now = System.currentTimeMillis();
+
+            checkInactivePlayers(now);
 
             if (!allClientsReady) {
                 long elapsedSinceStart = now - gameStartTime;
@@ -196,6 +214,24 @@ public class GameEngine implements Runnable {
         finishGame();
     }
 
+    private void checkInactivePlayers(long now) {
+        List<String> inactivePlayers = new ArrayList<>();
+        for (Map.Entry<String, Long> entry : lastActiveTime.entrySet()) {
+            if (now - entry.getValue() > 10000) {
+                inactivePlayers.add(entry.getKey());
+            }
+        }
+
+        for (String userId : inactivePlayers) {
+            Player player = lobby.getPlayers().get(userId);
+            if (player != null && player.getIsAlive()) {
+                log.info("Player {} marked as inactive (disconnected)", player.getUsername());
+                player.setIsAlive(false);
+                lastActiveTime.remove(userId);
+            }
+        }
+    }
+
     private void tick(long now) {
         if (!gameStarted || lobby.getStatus() != LobbyStatus.IN_PROGRESS) {
             return;
@@ -231,31 +267,27 @@ public class GameEngine implements Runnable {
             }
 
             for (PlayerInput pi : inputs) {
-                log.info("Processing input - User: {}, Action: {}", player.getUsername(), pi.action);
-
-                if ("jump".equals(pi.action) && Boolean.TRUE.equals(player.getIsOnGround())) {
+                if ("jump".equals(pi.action) && player.getIsOnGround()) {
+                    playerVelocityY.put(player.getUserId(), config.getJumpPower());
                     player.setIsOnGround(false);
+                    playerIsJumping.put(player.getUserId(), true);
                     player.setLastJumpTime(System.currentTimeMillis());
-                    player.setY(player.getY() - 28.0);
-                    log.info("JUMP - User: {}, New Y: {}", player.getUsername(), player.getY());
+                    log.info("JUMP - User: {}, Velocity: {}", player.getUsername(), config.getJumpPower());
                     Effect jumpEffect = new Effect(EffectType.JUMP, player.getX(), player.getY() + 20);
                     effects.add(jumpEffect);
                 }
 
                 if ("run".equals(pi.action)) {
                     playerRunning.put(player.getUserId(), true);
-                    log.info("RUN START - User: {}", player.getUsername());
                 }
 
                 if ("stop".equals(pi.action)) {
                     playerRunning.put(player.getUserId(), false);
-                    log.info("RUN STOP - User: {}", player.getUsername());
                 }
 
-                if ("slide".equals(pi.action) && Boolean.TRUE.equals(player.getIsOnGround())) {
+                if ("slide".equals(pi.action) && player.getIsOnGround()) {
                     player.setIsSliding(true);
                     player.setSlideEndTime(System.currentTimeMillis() + (long) config.getSlideDurationMs());
-                    log.info("SLIDE - User: {}", player.getUsername());
                 }
             }
         }
@@ -267,26 +299,57 @@ public class GameEngine implements Runnable {
 
             boolean isRunning = playerRunning.getOrDefault(player.getUserId(), false);
 
-            if (isRunning && Boolean.TRUE.equals(player.getIsOnGround())) {
-                player.setX(player.getX() + currentSpeed * 1.2);
-                player.setDistance(player.getDistance() + (currentSpeed / 10.0) * 1.2);
-                log.debug("MOVING - User: {}, X: {}, Distance: {}", player.getUsername(), player.getX(), player.getDistance());
+            if (isRunning) {
+                double moveDistance = Math.min(currentSpeed * 1.2, 8.0);
+                player.setX(player.getX() + moveDistance);
+                player.setDistance(player.getDistance() + (moveDistance / 10.0));
             }
 
-            if (Boolean.FALSE.equals(player.getIsOnGround())) {
-                player.setY(player.getY() + 0.9);
+            double velocityY = playerVelocityY.getOrDefault(player.getUserId(), 0.0);
 
-                if (player.getY() >= 448.0) {
-                    player.setY(448.0);
+            if (!player.getIsOnGround()) {
+                velocityY += config.getGravity();
+                playerVelocityY.put(player.getUserId(), velocityY);
+                player.setY(player.getY() + velocityY);
+
+                boolean landedOnPlatform = false;
+                for (Obstacle obstacle : obstacles) {
+                    if (obstacle.getType() == ObstacleType.PLATFORM) {
+                        double platformLeft = obstacle.getX() - worldOffset;
+                        double platformRight = obstacle.getX() - worldOffset + obstacle.getWidth();
+                        double playerBottom = player.getY() + 28;
+
+                        if (player.getX() + 16 > platformLeft && player.getX() + 16 < platformRight &&
+                                playerBottom >= obstacle.getY() && playerBottom <= obstacle.getY() + 20 &&
+                                velocityY >= 0) {
+                            player.setY(obstacle.getY() - 28);
+                            player.setIsOnGround(true);
+                            player.setIsSliding(false);
+                            playerVelocityY.put(player.getUserId(), 0.0);
+                            playerIsJumping.put(player.getUserId(), false);
+                            landedOnPlatform = true;
+                            log.info("Player {} landed on platform at Y={}", player.getUsername(), obstacle.getY());
+                            break;
+                        }
+                    }
+                }
+
+                if (!landedOnPlatform && player.getY() >= config.getGroundY()) {
+                    player.setY(config.getGroundY());
                     player.setIsOnGround(true);
                     player.setIsSliding(false);
+                    playerVelocityY.put(player.getUserId(), 0.0);
+                    playerIsJumping.put(player.getUserId(), false);
 
                     Effect dustEffect = new Effect(EffectType.DUST, player.getX(), player.getY() + 20);
                     effects.add(dustEffect);
                 }
+            } else {
+                playerVelocityY.put(player.getUserId(), 0.0);
+                playerIsJumping.put(player.getUserId(), false);
             }
 
-            if (Boolean.TRUE.equals(player.getIsSliding())) {
+            if (player.getIsSliding()) {
                 if (System.currentTimeMillis() > player.getSlideEndTime()) {
                     player.setIsSliding(false);
                 }
@@ -302,12 +365,13 @@ public class GameEngine implements Runnable {
             }
 
             boolean isRunning = playerRunning.getOrDefault(player.getUserId(), false);
+            boolean isJumping = playerIsJumping.getOrDefault(player.getUserId(), false);
 
-            if (Boolean.TRUE.equals(player.getIsSliding())) {
+            if (player.getIsSliding()) {
                 player.setAnimation(AnimationType.SLIDING.name());
-            } else if (Boolean.FALSE.equals(player.getIsOnGround())) {
+            } else if (!player.getIsOnGround() && isJumping) {
                 player.setAnimation(AnimationType.JUMPING.name());
-            } else if (isRunning && Boolean.TRUE.equals(player.getIsOnGround())) {
+            } else if (isRunning && player.getIsOnGround()) {
                 player.setAnimation(AnimationType.RUNNING.name());
             } else {
                 player.setAnimation(AnimationType.IDLE.name());
@@ -334,195 +398,235 @@ public class GameEngine implements Runnable {
     }
 
     private void checkCollisions() {
-        long currentTime = System.currentTimeMillis();
-
         for (Player player : lobby.getPlayers().values()) {
             if (!player.getIsAlive()) continue;
 
-            boolean collided = false;
-
-            for (Obstacle obstacle : obstacles) {
+            for (Obstacle obstacle : new ArrayList<>(obstacles)) {
                 if (isCollision(player, obstacle)) {
-                    Long lastCollision = lastCollisionTime.get(player.getUserId());
-                    if (lastCollision == null || (currentTime - lastCollision) > 500) {
-                        handleCollision(player, obstacle);
-                        lastCollisionTime.put(player.getUserId(), currentTime);
-                        collided = true;
-                        break;
-                    }
+                    handleCollision(player, obstacle);
                 }
             }
 
-            if (player.getY() > 580) {
-                if ((currentTime - lastCollisionTime.getOrDefault(player.getUserId(), 0L)) > 500) {
-                    player.setLives(player.getLives() - 1);
-                    lastCollisionTime.put(player.getUserId(), currentTime);
+            if (!testingMode) {
+                if (player.getX() < worldOffset - 100) {
+                    player.setLives(0);
+                    player.setIsAlive(false);
+                    log.info("Player {} was left behind and died", player.getUsername());
+                }
 
-                    if (player.getLives() <= 0) {
-                        player.setIsAlive(false);
-                        player.setAnimation(AnimationType.DYING.name());
-                        Effect explosion = new Effect(EffectType.EXPLOSION, player.getX(), player.getY());
-                        effects.add(explosion);
-                        log.info("Player {} fell to death", player.getUsername());
-                    } else {
-                        player.setY(448.0);
-                        player.setIsOnGround(true);
-                        Effect hurtEffect = new Effect(EffectType.EXPLOSION, player.getX(), player.getY());
-                        effects.add(hurtEffect);
-                        log.info("Player {} lost a life, remaining: {}", player.getUsername(), player.getLives());
-                    }
+                if (player.getY() > 600) {
+                    player.setLives(0);
+                    player.setIsAlive(false);
+                    Effect explosion = new Effect(EffectType.EXPLOSION, player.getX(), player.getY());
+                    effects.add(explosion);
+                    log.info("Player {} fell to death", player.getUsername());
                 }
             }
         }
-
-        obstacles.removeIf(o -> o.getX() + o.getWidth() < worldOffset - 500);
     }
 
     private boolean isCollision(Player player, Obstacle obstacle) {
-        double playerLeft = player.getX();
-        double playerRight = player.getX() + 32;
-        double playerTop = player.getY();
-        double playerBottom = player.getY() + 32;
+        double playerLeft = player.getX() + 10;
+        double playerRight = player.getX() + 22;
+        double playerTop = player.getY() + 10;
+        double playerBottom = player.getY() + 28;
 
-        if (Boolean.TRUE.equals(player.getIsSliding())) {
-            playerTop = player.getY() + 16;
+        if (player.getIsSliding()) {
+            playerTop = player.getY() + 20;
+            playerBottom = player.getY() + 28;
         }
 
-        double obstacleLeft = obstacle.getX() - worldOffset;
-        double obstacleRight = obstacle.getX() - worldOffset + obstacle.getWidth();
-        double obstacleTop = obstacle.getY();
-        double obstacleBottom = obstacle.getY() + obstacle.getHeight();
+        double obstacleLeft = obstacle.getX() - worldOffset + 4;
+        double obstacleRight = obstacle.getX() - worldOffset + obstacle.getWidth() - 4;
+        double obstacleTop = obstacle.getY() + 4;
+        double obstacleBottom = obstacle.getY() + obstacle.getHeight() - 4;
 
-        return playerRight > obstacleLeft && playerLeft < obstacleRight &&
+        boolean collision = playerRight > obstacleLeft && playerLeft < obstacleRight &&
                 playerBottom > obstacleTop && playerTop < obstacleBottom;
+
+        if (collision && obstacle.getType() == ObstacleType.PLATFORM) {
+            if (playerBottom > obstacleTop + 8) {
+                return false;
+            }
+        }
+
+        if (collision) {
+            log.info("COLLISION - Player: {}, Obstacle: {}, Player X: {}, Obstacle X: {}",
+                    player.getUsername(), obstacle.getType(), player.getX(), obstacle.getX() - worldOffset);
+        }
+
+        return collision;
     }
 
     private void handleCollision(Player player, Obstacle obstacle) {
-        log.info("COLLISION - Player: {}, Obstacle: {}, Lives before: {}",
-                player.getUsername(), obstacle.getType(), player.getLives());
+        log.info("HANDLING COLLISION - Player: {}, Obstacle: {}", player.getUsername(), obstacle.getType());
+
+        if (testingMode) {
+            log.info("TESTING MODE: Collision detected but no damage applied");
+            Effect hitEffect = new Effect(EffectType.EXPLOSION, obstacle.getX(), obstacle.getY());
+            effects.add(hitEffect);
+
+            if (obstacle.getType() == ObstacleType.TRAMPOLINE) {
+                player.setIsOnGround(false);
+                playerVelocityY.put(player.getUserId(), -16.0);
+                playerIsJumping.put(player.getUserId(), true);
+                Effect jumpEffect = new Effect(EffectType.JUMP, player.getX(), player.getY());
+                effects.add(jumpEffect);
+                log.info("TRAMPOLINE - Player {} bounced (testing mode)", player.getUsername());
+            }
+
+            if (obstacle.getType() == ObstacleType.POWERUP_SPEED) {
+                currentSpeed = Math.min(currentSpeed + 1.5, config.getMaxSpeed());
+                Effect starEffect = new Effect(EffectType.STAR, obstacle.getX(), obstacle.getY());
+                effects.add(starEffect);
+                log.info("POWERUP - Player {} got speed boost (testing mode)", player.getUsername());
+            }
+
+            if (obstacle.getType() == ObstacleType.PLATFORM) {
+                if (player.getY() + 28 > obstacle.getY() && player.getY() + 28 < obstacle.getY() + 25) {
+                    player.setY(obstacle.getY() - 28);
+                    player.setIsOnGround(true);
+                    playerVelocityY.put(player.getUserId(), 0.0);
+                    playerIsJumping.put(player.getUserId(), false);
+                    log.info("PLATFORM - Player {} landed on platform (testing mode)", player.getUsername());
+                }
+            }
+
+            obstacles.remove(obstacle);
+            return;
+        }
 
         switch (obstacle.getType()) {
             case TRAMPOLINE:
                 player.setIsOnGround(false);
-                player.setY(player.getY() - 30);
+                playerVelocityY.put(player.getUserId(), -16.0);
+                playerIsJumping.put(player.getUserId(), true);
                 Effect jumpEffect = new Effect(EffectType.JUMP, player.getX(), player.getY());
                 effects.add(jumpEffect);
                 log.info("TRAMPOLINE - Player {} bounced", player.getUsername());
+                obstacles.remove(obstacle);
                 break;
             case POWERUP_SPEED:
                 currentSpeed = Math.min(currentSpeed + 1.5, config.getMaxSpeed());
-                obstacles.remove(obstacle);
                 Effect starEffect = new Effect(EffectType.STAR, obstacle.getX(), obstacle.getY());
                 effects.add(starEffect);
                 log.info("POWERUP - Player {} got speed boost", player.getUsername());
+                obstacles.remove(obstacle);
                 break;
             case PLATFORM:
-                if (player.getY() + 32 > obstacle.getY() && player.getY() < obstacle.getY() + obstacle.getHeight()) {
-                    player.setY(obstacle.getY() - 32);
+                if (player.getY() + 28 > obstacle.getY() && player.getY() + 28 < obstacle.getY() + 25) {
+                    player.setY(obstacle.getY() - 28);
                     player.setIsOnGround(true);
-                    log.info("PLATFORM - Player {} landed on platform", player.getUsername());
+                    playerVelocityY.put(player.getUserId(), 0.0);
+                    playerIsJumping.put(player.getUserId(), false);
+                    log.info("PLATFORM - Player {} landed on platform at Y={}", player.getUsername(), obstacle.getY());
                 }
                 break;
-            case ROCK:
-            case SPIKE:
-            case BLADE:
-                player.setLives(player.getLives() - 1);
+            default:
+                int damage = 1;
+                if (obstacle.getType() == ObstacleType.BLADE) damage = 2;
+                if (obstacle.getType() == ObstacleType.PIT) damage = 3;
+
+                player.setLives(player.getLives() - damage);
                 Effect explosionHit = new Effect(EffectType.EXPLOSION, obstacle.getX(), obstacle.getY());
                 effects.add(explosionHit);
-                log.info("DAMAGE - Player {} hit {}, lives remaining: {}",
-                        player.getUsername(), obstacle.getType(), player.getLives());
+                log.info("DAMAGE - Player {} hit {}, damage: {}, lives remaining: {}",
+                        player.getUsername(), obstacle.getType(), damage, player.getLives());
+
                 if (player.getLives() <= 0) {
                     player.setIsAlive(false);
                     Effect deathExplosion = new Effect(EffectType.EXPLOSION, player.getX(), player.getY());
                     effects.add(deathExplosion);
                     log.info("DEATH - Player {} died", player.getUsername());
                 }
+                obstacles.remove(obstacle);
                 break;
-            case LAVA:
-            case PIT:
-                player.setLives(0);
-                player.setIsAlive(false);
-                Effect explosionDeath = new Effect(EffectType.EXPLOSION, player.getX(), player.getY());
-                effects.add(explosionDeath);
-                log.info("DEATH - Player {} fell into {}", player.getUsername(), obstacle.getType());
-                break;
-            default:
-                break;
-        }
-
-        if (obstacle.getType() != ObstacleType.PLATFORM && obstacle.getType() != ObstacleType.TRAMPOLINE) {
-            obstacles.remove(obstacle);
         }
     }
 
     private void generateObstacles() {
-        if (obstacles.size() < 6 && random.nextDouble() < 0.015) {
-            ObstacleType[] types = {
-                    ObstacleType.PLATFORM,
-                    ObstacleType.TRAMPOLINE,
-                    ObstacleType.POWERUP_SPEED,
-                    ObstacleType.ROCK,
-                    ObstacleType.BLADE,
-                    ObstacleType.SPIKE,
-                    ObstacleType.LAVA,
-                    ObstacleType.PIT
-            };
+        if (obstacles.size() >= 8) return;
 
-            double randomValue = random.nextDouble();
+        double minDistance = 350;
+        double distanceSinceLast = (worldOffset + 500) - lastObstacleX;
+
+        if (distanceSinceLast < minDistance && lastObstacleX > 0) return;
+
+        if (random.nextDouble() < 0.025) {
+            double zone = worldOffset;
+            double x = worldOffset + 800 + random.nextDouble() * 400;
+            double y = config.getGroundY();
             ObstacleType type;
 
-            if (randomValue < 0.25) {
-                type = ObstacleType.PLATFORM;
-            } else if (randomValue < 0.4) {
-                type = ObstacleType.TRAMPOLINE;
-            } else if (randomValue < 0.5) {
-                type = ObstacleType.POWERUP_SPEED;
-            } else if (randomValue < 0.6) {
-                type = ObstacleType.ROCK;
-            } else if (randomValue < 0.7) {
-                type = ObstacleType.BLADE;
-            } else if (randomValue < 0.8) {
-                type = ObstacleType.SPIKE;
-            } else if (randomValue < 0.9) {
-                type = ObstacleType.LAVA;
+            if (zone < 2000) {
+                type = getEasyObstacle();
+                y = getYForObstacle(type);
+            } else if (zone < 4000) {
+                type = getMediumObstacle();
+                y = getYForObstacle(type);
+            } else if (zone < 6000) {
+                type = getHardObstacle();
+                y = getYForObstacle(type);
             } else {
-                type = ObstacleType.PIT;
+                type = getAllObstacle();
+                y = getYForObstacle(type);
             }
 
-            double x = worldOffset + 900 + random.nextDouble() * 500;
-            double y = 448;
+            if (random.nextDouble() < 0.3 && zone > 2500) {
+                y = config.getPlatformY();
+                type = ObstacleType.PLATFORM;
+            }
 
-            switch (type) {
-                case PLATFORM:
-                    y = 398;
-                    break;
-                case TRAMPOLINE:
-                    y = 432;
-                    break;
-                case ROCK:
-                    y = 416;
-                    break;
-                case BLADE:
-                    y = 388;
-                    break;
-                case SPIKE:
-                    y = 448;
-                    break;
-                case LAVA:
-                    y = 448;
-                    break;
-                case PIT:
-                    y = 448;
-                    break;
-                default:
-                    y = 448;
-                    break;
+            if (random.nextDouble() < 0.2 && zone > 4500) {
+                y = config.getPlatformHighY();
+                type = ObstacleType.PLATFORM;
+            }
+
+            if (random.nextDouble() < 0.15 && zone > 3500) {
+                y = config.getHighHeightY();
+                type = ObstacleType.BLADE;
             }
 
             Obstacle obstacle = new Obstacle(type, x, y);
             obstacles.add(obstacle);
-            log.debug("Obstacle generated: {} at position {}", type, x);
+            lastObstacleX = x;
+            log.info("Obstacle generated: {} at position {} (y={})", type, x, y);
         }
+    }
+
+    private double getYForObstacle(ObstacleType type) {
+        switch (type) {
+            case PLATFORM:
+                return config.getPlatformY();
+            case TRAMPOLINE:
+                return config.getLowHeightY();
+            case POWERUP_SPEED:
+                return config.getLowHeightY();
+            case BLADE:
+                return config.getMediumHeightY();
+            default:
+                return config.getGroundY();
+        }
+    }
+
+    private ObstacleType getEasyObstacle() {
+        ObstacleType[] types = {ObstacleType.SPIKE, ObstacleType.ROCK, ObstacleType.TRAMPOLINE, ObstacleType.POWERUP_SPEED};
+        return types[random.nextInt(types.length)];
+    }
+
+    private ObstacleType getMediumObstacle() {
+        ObstacleType[] types = {ObstacleType.SPIKE, ObstacleType.ROCK, ObstacleType.TRAMPOLINE, ObstacleType.LAVA, ObstacleType.POWERUP_SPEED};
+        return types[random.nextInt(types.length)];
+    }
+
+    private ObstacleType getHardObstacle() {
+        ObstacleType[] types = {ObstacleType.SPIKE, ObstacleType.ROCK, ObstacleType.TRAMPOLINE, ObstacleType.LAVA, ObstacleType.BLADE, ObstacleType.PIT, ObstacleType.POWERUP_SPEED};
+        return types[random.nextInt(types.length)];
+    }
+
+    private ObstacleType getAllObstacle() {
+        ObstacleType[] types = ObstacleType.values();
+        return types[random.nextInt(types.length)];
     }
 
     private void updateEffects(long now) {
@@ -542,7 +646,6 @@ public class GameEngine implements Runnable {
             double newSpeed = currentSpeed * config.getSpeedIncreaseFactor();
             currentSpeed = Math.min(newSpeed, config.getMaxSpeed());
             lastSpeedIncrease = now;
-            log.debug("Scroll speed increased to {}", currentSpeed);
         }
     }
 
@@ -603,12 +706,23 @@ public class GameEngine implements Runnable {
                 .filter(Player::getIsAlive)
                 .count();
 
-        double maxDistance = lobby.getPlayers().values().stream()
-                .mapToDouble(Player::getDistance)
-                .max()
-                .orElse(0);
+        if (aliveCount <= 1) {
+            if (aliveCount == 1) {
+                Player winner = lobby.getPlayers().values().stream()
+                        .filter(Player::getIsAlive)
+                        .findFirst()
+                        .orElse(null);
+                if (winner != null) {
+                    gameEndMessage = "🏆 " + winner.getUsername() + " GANA! 🏆";
+                    broadcastGameEndMessage(gameEndMessage);
+                    log.info("Winner: {}", winner.getUsername());
+                }
+            } else if (aliveCount == 0) {
+                gameEndMessage = "💀 EMPATE! Todos murieron 💀";
+                broadcastGameEndMessage(gameEndMessage);
+                log.info("All players died - Tie!");
+            }
 
-        if (aliveCount <= 1 || maxDistance >= config.getTrackLength()) {
             lobby.setStatus(LobbyStatus.FINISHED);
             running = false;
             log.info("Game over detected - stopping engine for lobby {}", lobby.getCode());
