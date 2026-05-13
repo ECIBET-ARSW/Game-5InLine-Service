@@ -1,8 +1,8 @@
 package com.ecibet.game5inline.service;
 
-import com.ecibet.game5inline.messaging.GameEventPublisher;
 import com.ecibet.game5inline.model.GameConfig;
 import com.ecibet.game5inline.model.Lobby;
+import com.ecibet.game5inline.messaging.GameEventPublisher;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationEventPublisher;
@@ -18,38 +18,43 @@ import java.util.concurrent.Executors;
 @RequiredArgsConstructor
 public class GameEngineManager {
 
+    private final Map<String, GameEngine> engines = new ConcurrentHashMap<>();
+    private final Map<String, Thread> engineThreads = new ConcurrentHashMap<>();
+    private final ExecutorService executor = Executors.newCachedThreadPool();
     private final GameEventPublisher eventPublisher;
     private final ApplicationEventPublisher applicationEventPublisher;
-    private final Map<String, GameEngine> activeEngines = new ConcurrentHashMap<>();
-    private final ExecutorService executorService = Executors.newCachedThreadPool();
 
     public void startEngine(Lobby lobby, GameConfig config) {
-        if (activeEngines.containsKey(lobby.getId())) {
+        String lobbyId = lobby.getId();
+
+        if (engines.containsKey(lobbyId)) {
             log.warn("Engine already running for lobby {}", lobby.getCode());
             return;
         }
 
         GameEngine engine = new GameEngine(lobby, config, eventPublisher, applicationEventPublisher);
-        activeEngines.put(lobby.getId(), engine);
+        engines.put(lobbyId, engine);
 
-        executorService.submit(engine);
+        Thread thread = new Thread(engine, "game-engine-" + lobby.getCode());
+        thread.start();
+        engineThreads.put(lobbyId, thread);
 
         log.info("Game engine started for lobby {}", lobby.getCode());
     }
 
+    public GameEngine getEngine(String lobbyId) {
+        return engines.get(lobbyId);
+    }
+
     public void stopEngine(String lobbyId) {
-        GameEngine engine = activeEngines.remove(lobbyId);
+        GameEngine engine = engines.remove(lobbyId);
         if (engine != null) {
             engine.stop();
+            Thread thread = engineThreads.remove(lobbyId);
+            if (thread != null) {
+                thread.interrupt();
+            }
             log.info("Game engine stopped for lobby {}", lobbyId);
         }
-    }
-
-    public GameEngine getEngine(String lobbyId) {
-        return activeEngines.get(lobbyId);
-    }
-
-    public boolean isRunning(String lobbyId) {
-        return activeEngines.containsKey(lobbyId);
     }
 }

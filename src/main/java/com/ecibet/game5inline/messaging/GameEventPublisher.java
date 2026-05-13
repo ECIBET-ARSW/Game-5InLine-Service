@@ -3,7 +3,6 @@ package com.ecibet.game5inline.messaging;
 import com.ecibet.game5inline.event.BetLostEvent;
 import com.ecibet.game5inline.event.BetWonEvent;
 import com.ecibet.game5inline.model.Lobby;
-import com.ecibet.game5inline.model.Player;
 import com.ecibet.game5inline.model.PlayerResult;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -11,7 +10,7 @@ import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
-import java.time.Instant;
+import java.util.Date;
 import java.util.List;
 
 import static com.ecibet.game5inline.config.RabbitMQConfig.BET_LOST_ROUTING_KEY;
@@ -47,11 +46,15 @@ public class GameEventPublisher {
                         .selectionName("5InLine Race Winner")
                         .eventId(lobbyCode)
                         .transactionType("GAME_WON")
-                        .timestamp(Instant.now())
+                        .timestamp(new Date().toInstant())
                         .build();
 
                 log.info("Sending BetWonEvent for winner: {} - Amount: {}", userId, winnings);
-                rabbitTemplate.convertAndSend(GAME_EVENTS_EXCHANGE, BET_WON_ROUTING_KEY, wonEvent);
+                try {
+                    rabbitTemplate.convertAndSend(GAME_EVENTS_EXCHANGE, BET_WON_ROUTING_KEY, wonEvent);
+                } catch (Exception e) {
+                    log.error("Error sending BetWonEvent: {}", e.getMessage());
+                }
 
             } else {
                 BetLostEvent lostEvent = BetLostEvent.builder()
@@ -61,34 +64,12 @@ public class GameEventPublisher {
                         .build();
 
                 log.info("Sending BetLostEvent for loser: {} - Stake: {}", userId, stake);
-                rabbitTemplate.convertAndSend(GAME_EVENTS_EXCHANGE, BET_LOST_ROUTING_KEY, lostEvent);
+                try {
+                    rabbitTemplate.convertAndSend(GAME_EVENTS_EXCHANGE, BET_LOST_ROUTING_KEY, lostEvent);
+                } catch (Exception e) {
+                    log.error("Error sending BetLostEvent: {}", e.getMessage());
+                }
             }
         }
-    }
-
-    public void publishSingleBetWon(String lobbyId, String userId, BigDecimal stake, BigDecimal winnings, String lobbyCode) {
-        BetWonEvent event = BetWonEvent.builder()
-                .betId(lobbyId)
-                .userId(userId)
-                .amount(winnings)
-                .stake(stake)
-                .odds(BigDecimal.valueOf(1.0))
-                .selectionName("5InLine Race Winner")
-                .eventId(lobbyCode)
-                .transactionType("GAME_WON")
-                .timestamp(Instant.now())
-                .build();
-
-        rabbitTemplate.convertAndSend(GAME_EVENTS_EXCHANGE, BET_WON_ROUTING_KEY, event);
-    }
-
-    public void publishSingleBetLost(String lobbyId, String userId, BigDecimal stake) {
-        BetLostEvent event = BetLostEvent.builder()
-                .betId(lobbyId)
-                .userId(userId)
-                .stake(stake)
-                .build();
-
-        rabbitTemplate.convertAndSend(GAME_EVENTS_EXCHANGE, BET_LOST_ROUTING_KEY, event);
     }
 }
