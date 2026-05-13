@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
@@ -41,11 +42,10 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
         String lobbyCode = event.getLobbyCode();
         Object data = event.getData();
 
-        log.info("=== EVENTO RECIBIDO EN WEBSOCKET HANDLER === Tipo: {}, Lobby: {}, Thread: {}",
-                eventType, lobbyCode, Thread.currentThread().getName());
+        log.info("=== GAME EVENT RECEIVED === Type: {}, Lobby: {}", eventType, lobbyCode);
 
         if (lobbyCode == null) {
-            log.warn("Lobby code es null, ignorando evento");
+            log.warn("Lobby code is null, ignoring event");
             return;
         }
 
@@ -59,79 +59,71 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
         String jsonMessage;
         try {
             jsonMessage = objectMapper.writeValueAsString(message);
-            log.info("Enviando mensaje a lobby {}: {}", lobbyCode, jsonMessage);
+            log.info("Broadcasting to lobby {}: {}", lobbyCode, jsonMessage);
         } catch (Exception e) {
-            log.error("Error serializando: {}", e.getMessage());
+            log.error("Error serializing: {}", e.getMessage());
             return;
         }
 
+        Set<String> sessionIds = sessionManager.getSessionsByLobby(lobbyCode);
+        log.info("Found {} sessions for lobby {}", sessionIds.size(), lobbyCode);
+
         int sentCount = 0;
-        for (String sessionId : sessionManager.getSessionsByLobby(lobbyCode)) {
+        for (String sessionId : sessionIds) {
             WebSocketSession session = sessionManager.getSession(sessionId);
             if (session != null && session.isOpen()) {
                 try {
-                    session.sendMessage(new TextMessage(jsonMessage));
+                    synchronized (session) {
+                        session.sendMessage(new TextMessage(jsonMessage));
+                    }
                     sentCount++;
-                    log.info("Mensaje enviado a sesion {}", sessionId);
+                    log.debug("Message sent to session {}", sessionId);
                 } catch (Exception e) {
-                    log.error("Error enviando a sesion {}: {}", sessionId, e.getMessage());
+                    log.error("Error sending to session {}: {}", sessionId, e.getMessage());
                 }
             }
         }
-        log.info("Mensaje {} enviado a {} sesiones en lobby {}", eventType, sentCount, lobbyCode);
+        log.info("Event {} sent to {} sessions in lobby {}", eventType, sentCount, lobbyCode);
     }
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
         log.info("WebSocket connection established: {}", session.getId());
-
-        String query = session.getUri().getQuery();
-        String userId = null;
-        String lobbyCode = null;
-
-        if (query != null) {
-            for (String param : query.split("&")) {
-                if (param.startsWith("userId=")) {
-                    userId = param.substring(7);
-                }
-                if (param.startsWith("lobbyCode=")) {
-                    lobbyCode = param.substring(10);
-                }
-            }
-        }
-
-        if (userId != null && lobbyCode != null) {
-            sessionManager.registerSession(session.getId(), userId, lobbyCode);
-            sessionManager.setUserSession(userId, session);
-            log.info("Usuario {} registrado en sala {}", userId, lobbyCode);
-            broadcastLobbyUpdate(lobbyCode);
-        } else {
-            log.warn("No userId or lobbyCode in query: {}", query);
-        }
     }
 
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
         String payload = message.getPayload();
-        log.info("Mensaje recibido: {}", payload);
+        log.info("Message received: {}", payload);
 
         String userId = sessionManager.getUserIdBySession(session.getId());
         String lobbyCode = sessionManager.getLobbyBySession(session.getId());
-
-        if (userId == null || lobbyCode == null) {
-            log.warn("User {} or lobby {} not found for session {}", userId, lobbyCode, session.getId());
-            return;
-        }
 
         try {
             Map<String, Object> json = objectMapper.readValue(payload, Map.class);
             String type = (String) json.get("type");
             if (type == null) return;
 
-            Lobby lobby = lobbyCache.getByCode(lobbyCode).orElse(null);
-            if (lobby == null) return;
+            log.info("Processing message type: {} for user: {}, lobby: {}", type, userId, lobbyCode);
 
-            log.info("Processing message type: {} for user {} in lobby {}", type, userId, lobbyCode);
+            if ("INIT".equals(type)) {
+                handleInit(session, json);
+                return;
+            }
+
+            if (userId == null || lobbyCode == null) {
+                log.warn("User {} or lobby {} not found for session {}", userId, lobbyCode, session.getId());
+                if ("PING".equals(type)) {
+                    sendPong(session);
+                }
+                return;
+            }
+
+            Lobby lobby = lobbyCache.getByCode(lobbyCode).orElse(null);
+            if (lobby == null) {
+                log.warn("Lobby {} not found", lobbyCode);
+                return;
+            }
 
             switch (type) {
                 case "PLAYER_ACTION":
@@ -155,9 +147,37 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
                 case "PING":
                     sendPong(session);
                     break;
+                default:
+                    log.warn("Unknown message type: {}", type);
             }
         } catch (Exception e) {
             log.error("Error handling message: {}", e.getMessage(), e);
+        }
+    }
+
+    private void handleInit(WebSocketSession session, Map<String, Object> json) {
+        String userId = (String) json.get("userId");
+        String lobbyCode = (String) json.get("lobbyCode");
+
+        log.info("HANDLE INIT - userId: {}, lobbyCode: {}", userId, lobbyCode);
+
+        if (userId != null && lobbyCode != null) {
+            sessionManager.registerSession(session.getId(), userId, lobbyCode);
+            sessionManager.setUserSession(userId, session);
+            log.info("User {} registered in lobby {} via SockJS INIT", userId, lobbyCode);
+            broadcastLobbyUpdate(lobbyCode);
+
+            try {
+                Map<String, Object> response = new HashMap<>();
+                response.put("type", "INIT_ACK");
+                response.put("status", "ok");
+                session.sendMessage(new TextMessage(objectMapper.writeValueAsString(response)));
+                log.info("INIT_ACK sent to session {}", session.getId());
+            } catch (Exception e) {
+                log.error("Error sending INIT_ACK: {}", e.getMessage());
+            }
+        } else {
+            log.warn("INIT message missing userId or lobbyCode: {}", json);
         }
     }
 
@@ -166,6 +186,7 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
             Map<String, Object> pong = new HashMap<>();
             pong.put("type", "PONG");
             session.sendMessage(new TextMessage(objectMapper.writeValueAsString(pong)));
+            log.debug("PONG sent to session {}", session.getId());
         } catch (Exception e) {
             log.error("Error sending pong: {}", e.getMessage());
         }
@@ -178,7 +199,7 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
         String action = (String) json.get("action");
         Long timestamp = json.get("timestamp") != null ? ((Number) json.get("timestamp")).longValue() : System.currentTimeMillis();
         engine.addInput(userId, action, timestamp);
-        log.info("Player action - User: {}, Action: {}", userId, action);
+        log.debug("Player action - User: {}, Action: {}", userId, action);
     }
 
     private void handleToggleReady(WebSocketSession session, Map<String, Object> json, String userId, String lobbyCode, Lobby lobby) {
@@ -192,6 +213,7 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
             player.setIsReady(!player.getIsReady());
             lobbyCache.put(lobby);
             log.info("Player {} toggled ready to: {}", userId, player.getIsReady());
+            broadcastLobbyUpdate(lobbyCode);
             broadcastLobbyUpdate(lobbyCode);
         }
     }
@@ -254,7 +276,7 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
             engine.addReadyClient(userId);
             log.info("Client {} is ready for game in lobby {}", userId, lobbyCode);
         } else {
-            log.warn("No game engine found for lobby {} when client {} tried to ready", lobbyCode, userId);
+            log.warn("No game engine found for lobby {}", lobbyCode);
         }
     }
 
@@ -309,6 +331,8 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
         String userId = sessionManager.getUserIdBySession(session.getId());
         String lobbyCode = sessionManager.getLobbyBySession(session.getId());
 
+        log.info("WebSocket connection closed - userId: {}, lobbyCode: {}", userId, lobbyCode);
+
         if (userId != null && lobbyCode != null) {
             Lobby lobby = lobbyCache.getByCode(lobbyCode).orElse(null);
             if (lobby != null) {
@@ -322,6 +346,5 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
             }
         }
         sessionManager.unregisterSession(session.getId());
-        log.info("WebSocket connection closed: {}", session.getId());
     }
 }
