@@ -17,7 +17,7 @@ public class WebSocketConfig implements WebSocketConfigurer {
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(gameWebSocketHandler, "/ws")
-                .setAllowedOrigins("http://localhost:5173")
+                .setAllowedOrigins("https://ecibet-front.vercel.app")
                 .withSockJS()
                 .setWebSocketEnabled(true)
                 .setHttpMessageCacheSize(1000)
