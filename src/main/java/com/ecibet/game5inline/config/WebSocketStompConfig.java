@@ -20,8 +20,20 @@ public class WebSocketStompConfig implements WebSocketMessageBrokerConfigurer {
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
         registry.addEndpoint("/ws")
-                .setAllowedOrigins("*")
+                .setAllowedOrigins(
+                        "http://localhost:5173",
+                        "https://5inline.duckdns.org",
+                        "http://5inline.duckdns.org"
+                )
                 .withSockJS()
                 .setClientLibraryUrl("https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js");
+
+        // Agregar endpoint sin SockJS para WebSocket puro
+        registry.addEndpoint("/ws")
+                .setAllowedOrigins(
+                        "http://localhost:5173",
+                        "https://5inline.duckdns.org",
+                        "http://5inline.duckdns.org"
+                );
     }
 }
